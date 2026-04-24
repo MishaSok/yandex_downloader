@@ -4,41 +4,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-CLI script that searches YouTube (via `yt-dlp`) for a track by artist + title and downloads the audio. If `ffmpeg` is present, converts to MP3; otherwise saves as-is (usually `.webm`/Opus).
+Two-component tool for downloading your Yandex Music liked tracks via YouTube:
 
-## Running the script
+1. **`parser/`** — Selenium-based scraper that exports the "Мне нравится" playlist from Yandex Music to JSON/CSV.
+2. **`script/`** — CLI downloader that searches YouTube (via `yt-dlp`) for each track and downloads the audio as MP3.
 
-```bash
-# Two positional args: artist, title
-python3 download_track.py "Хаски" "kanye west diss"
+## Directory structure
 
-# Free-form query
-python3 download_track.py --query "Хаски kanye west diss"
+```
+parser/
+  main.py            Yandex Music playlist scraper (Selenium + Chrome)
+  requirements.txt   selenium, webdriver-manager
+  liked_tracks.csv   output (generated)
+  liked_tracks.json  output (generated)
 
-# Custom output directory
-python3 download_track.py "Хаски" "kanye west diss" --out ~/Music
+script/
+  download_track.py  YouTube downloader with SQLite queue
+  tracks.db          SQLite queue (generated)
+  downloads/         Downloaded MP3 files (generated)
 ```
 
-Downloaded files land in `./downloads/` by default.
+## Единый запуск (рекомендуется)
 
-## Dependencies
+```bash
+# Полный цикл: парсинг → импорт → скачка
+python3 run.py "https://music.yandex.ru/playlists/lk.xxxx"
 
-- `yt-dlp` — install: `pip3 install yt-dlp --break-system-packages`
-- `rich` — install: `pip3 install rich --break-system-packages`
-- `ffmpeg` — install: `sudo apt-get install -y ffmpeg` (optional but required for true MP3 output)
+# Скачать только первые 10 треков
+python3 run.py "https://music.yandex.ru/playlists/lk.xxxx" --limit 10
 
-## Architecture
+# Пропустить парсинг, использовать готовый parser/liked_tracks.json
+python3 run.py --no-parse
 
-Single file `download_track.py`:
+# Только распарсить и импортировать, без скачки
+python3 run.py "https://music.yandex.ru/playlists/lk.xxxx" --no-download
+```
 
-- `main()` — parses CLI args (argparse), routes to `download()`
-- `build_query(artist, title)` — joins into `"artist - title"` string
-- `download(query, output_dir)` — checks for ffmpeg, builds the `yt-dlp` command, runs it via `subprocess.run()`
+## Отдельный запуск парсера
+
+```bash
+pip install -r parser/requirements.txt
+python3 parser/main.py "https://music.yandex.ru/playlists/lk.xxxx"
+# Outputs: parser/liked_tracks.json, parser/liked_tracks.csv
+```
+
+## Отдельный запуск загрузчика
+
+```bash
+# Import tracks from parser output
+python3 script/download_track.py import parser/liked_tracks.json
+
+# Show queue
+python3 script/download_track.py list
+
+# Download all pending tracks
+python3 script/download_track.py download
+
+# Add a single track manually
+python3 script/download_track.py add "Хаски" "kanye west diss"
+
+# Retry failed tracks
+python3 script/download_track.py retry
+```
+
+Downloaded files land in `script/downloads/`.
+
+## Script dependencies
+
+- `yt-dlp` — `pip3 install yt-dlp --break-system-packages`
+- `rich` — `pip3 install rich --break-system-packages`
+- `mutagen` — `pip3 install mutagen --break-system-packages`
+- `ffmpeg` — `sudo apt-get install -y ffmpeg` (optional; required for MP3 output)
+
+## Script architecture (`script/download_track.py`)
+
+- `main()` — argparse entry point, dispatches to subcommands
+- `cmd_import / cmd_add / cmd_list / cmd_download / cmd_retry` — one function per subcommand
+- `download_one(query, output_dir, artist, title)` — calls yt-dlp, renames file, embeds ID3 tags
+- `get_conn()` — opens/migrates the SQLite database
 - YouTube search uses `yt-dlp`'s built-in `ytsearch1:` prefix — no separate search API needed
 
 ## Known limitations
 
-- One track per invocation; no batch/list-file mode yet
-- No retry on failure — `sys.exit()` on non-zero yt-dlp exit code
-- No rate limiting / sleep between requests (causes YouTube 429 at scale)
-- No skip-if-already-downloaded logic
+- No retry on network error mid-download (mark failed + run `retry`)
+- No rate limiting beyond random 2–5 s sleep between tracks

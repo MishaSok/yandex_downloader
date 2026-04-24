@@ -13,6 +13,7 @@ Commands:
 import argparse
 import json
 import random
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -20,6 +21,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+from mutagen import File as MutagenFile
 
 from rich.console import Console
 from rich.table import Table
@@ -39,8 +42,14 @@ STATUS_STYLE = {
     "failed":  "red bold",
 }
 
-DB_PATH = Path("tracks.db")
-DOWNLOADS_DIR = Path("downloads")
+_DIR = Path(__file__).parent
+DB_PATH = _DIR / "tracks.db"
+DOWNLOADS_DIR = _DIR / "downloads"
+MAX_DURATION_SEC = 15 * 60
+
+
+class TooLongError(Exception):
+    pass
 
 
 # ── Database ──────────────────────────────────────────────────────────────────
@@ -57,6 +66,7 @@ def get_conn() -> sqlite3.Connection:
             duration       TEXT,
             duration_sec   INTEGER,
             yandex_index   INTEGER,
+            cover_url      TEXT,
             status         TEXT    NOT NULL DEFAULT 'pending',
             file_path      TEXT,
             error          TEXT,
@@ -80,33 +90,84 @@ def find_ffmpeg() -> bool:
 
 def build_yt_dlp_cmd(query: str, output_dir: Path) -> list[str]:
     search = f"ytsearch1:{query}"
+    common = [
+        "--no-playlist",
+        "--print", "%(duration)s",        # printed before download starts
+        "--print", "after_move:filepath",
+    ]
     if find_ffmpeg():
         return [
             "yt-dlp",
             "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0",
             "--output", str(output_dir / "%(title)s.%(ext)s"),
-            "--no-playlist", "--print", "after_move:filepath",
-            search,
+            *common, search,
         ]
     else:
         return [
             "yt-dlp",
             "--format", "bestaudio",
             "--output", str(output_dir / "%(title)s.%(ext)s"),
-            "--no-playlist", "--print", "after_move:filepath",
-            search,
+            *common, search,
         ]
 
 
-def download_one(query: str, output_dir: Path) -> str:
-    """Returns file path on success, raises RuntimeError on failure."""
+def sanitize_filename(name: str) -> str:
+    return re.sub(r'[<>:"/\\|?*]', '_', name).strip()
+
+
+def fmt_duration(seconds: int) -> str:
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def embed_metadata(filepath: Path, artist: str, title: str) -> None:
+    try:
+        audio = MutagenFile(str(filepath), easy=True)
+        if audio is None:
+            return
+        if audio.tags is None:
+            audio.add_tags()
+        audio["artist"] = [artist]
+        audio["title"] = [title]
+        audio.save()
+    except Exception:
+        pass
+
+
+def download_one(query: str, output_dir: Path, artist: str, title: str) -> str:
+    """Returns file path on success, raises RuntimeError or TooLongError."""
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_yt_dlp_cmd(query, output_dir)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "yt-dlp error")
-    filepath = result.stdout.strip().splitlines()[-1]
-    return filepath
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    # First --print fires before the download: duration in seconds
+    dur_line = proc.stdout.readline().strip()
+    try:
+        dur_sec = int(dur_line)
+    except ValueError:
+        dur_sec = 0
+
+    if dur_sec > MAX_DURATION_SEC:
+        proc.kill()
+        proc.wait()
+        raise TooLongError(f"too long ({fmt_duration(dur_sec)})")
+
+    stdout_rest, stderr = proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(stderr.strip().splitlines()[-1] if stderr.strip() else "yt-dlp error")
+
+    filepath_line = stdout_rest.strip().splitlines()[-1] if stdout_rest.strip() else ""
+    if not filepath_line:
+        raise RuntimeError("yt-dlp produced no output")
+
+    downloaded = Path(filepath_line)
+    target_name = sanitize_filename(f"{artist} - {title}") + downloaded.suffix
+    target = downloaded.parent / target_name
+    if downloaded != target:
+        downloaded.rename(target)
+    embed_metadata(target, artist, title)
+    return str(target)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -134,9 +195,9 @@ def cmd_import(args: argparse.Namespace) -> None:
         for item in data:
             try:
                 conn.execute("""
-                    INSERT INTO tracks (artist, title, duration, duration_sec, yandex_index)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (item["artist"], item["title"], item.get("duration"), item.get("duration_sec"), item.get("index")))
+                    INSERT INTO tracks (artist, title, duration, duration_sec, yandex_index, cover_url)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (item["artist"], item["title"], item.get("duration"), item.get("duration_sec"), item.get("index"), item.get("cover_url")))
                 added += 1
             except sqlite3.IntegrityError:
                 skipped += 1
@@ -228,7 +289,7 @@ def cmd_download(args: argparse.Namespace) -> None:
     total = len(rows)
     console.print(Panel(f"[bold]Downloading [green]{total}[/green] track{'s' if total != 1 else ''}[/bold]", expand=False))
 
-    done = failed = 0
+    done = failed = skipped = 0
 
     with Progress(
         SpinnerColumn(),
@@ -249,7 +310,7 @@ def cmd_download(args: argparse.Namespace) -> None:
             progress.update(current, description=f"↓  {label}")
 
             try:
-                filepath = download_one(search_query, DOWNLOADS_DIR)
+                filepath = download_one(search_query, DOWNLOADS_DIR, artist, title)
                 conn.execute(
                     "UPDATE tracks SET status='done', file_path=?, error=NULL, downloaded_at=? WHERE id=?",
                     (filepath, datetime.now().isoformat(), row["id"]),
@@ -257,6 +318,15 @@ def cmd_download(args: argparse.Namespace) -> None:
                 conn.commit()
                 console.print(f"  [green]✓[/green] {label}  [dim]{Path(filepath).name}[/dim]")
                 done += 1
+            except TooLongError as e:
+                error_msg = str(e)
+                conn.execute(
+                    "UPDATE tracks SET status='failed', error=? WHERE id=?",
+                    (error_msg, row["id"]),
+                )
+                conn.commit()
+                console.print(f"  [yellow]⊘[/yellow] {label}  [yellow dim]{error_msg}[/yellow dim]")
+                skipped += 1
             except Exception as e:
                 error_msg = str(e)
                 conn.execute(
@@ -278,6 +348,8 @@ def cmd_download(args: argparse.Namespace) -> None:
     parts = []
     if done:
         parts.append(f"[green]{done} downloaded[/green]")
+    if skipped:
+        parts.append(f"[yellow]{skipped} skipped (too long)[/yellow]")
     if failed:
         parts.append(f"[red]{failed} failed[/red]")
     console.print("\n  " + "  ·  ".join(parts))

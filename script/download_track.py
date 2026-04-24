@@ -135,7 +135,9 @@ def fetch_cover(url: str) -> tuple[bytes, str] | None:
         return None
 
 
-def embed_metadata(filepath: Path, artist: str, title: str, cover_url: str = "") -> None:
+def embed_metadata(filepath: Path, artist: str, title: str, cover_url: str = "") -> bool:
+    """Returns True if album cover was successfully embedded."""
+    cover_embedded = False
     try:
         if filepath.suffix.lower() == ".mp3":
             audio = MP3(str(filepath), ID3=ID3)
@@ -148,11 +150,12 @@ def embed_metadata(filepath: Path, artist: str, title: str, cover_url: str = "")
                 if cover:
                     data, mime = cover
                     audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data))
+                    cover_embedded = True
             audio.save(v2_version=3)
         else:
             audio = MutagenFile(str(filepath), easy=True)
             if audio is None:
-                return
+                return False
             if audio.tags is None:
                 audio.add_tags()
             audio["artist"] = [artist]
@@ -160,10 +163,11 @@ def embed_metadata(filepath: Path, artist: str, title: str, cover_url: str = "")
             audio.save()
     except Exception:
         pass
+    return cover_embedded
 
 
-def download_one(query: str, output_dir: Path, artist: str, title: str, cover_url: str = "") -> str:
-    """Returns file path on success, raises RuntimeError or TooLongError."""
+def download_one(query: str, output_dir: Path, artist: str, title: str, cover_url: str = "") -> tuple[str, bool]:
+    """Returns (file_path, cover_embedded) on success, raises RuntimeError or TooLongError."""
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_yt_dlp_cmd(query, output_dir)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -193,8 +197,8 @@ def download_one(query: str, output_dir: Path, artist: str, title: str, cover_ur
     target = downloaded.parent / target_name
     if downloaded != target:
         downloaded.rename(target)
-    embed_metadata(target, artist, title, cover_url)
-    return str(target)
+    cover_embedded = embed_metadata(target, artist, title, cover_url)
+    return str(target), cover_embedded
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -337,13 +341,14 @@ def cmd_download(args: argparse.Namespace) -> None:
             progress.update(current, description=f"↓  {label}")
 
             try:
-                filepath = download_one(search_query, DOWNLOADS_DIR, artist, title, row["cover_url"] or "")
+                filepath, cover_ok = download_one(search_query, DOWNLOADS_DIR, artist, title, row["cover_url"] or "")
                 conn.execute(
                     "UPDATE tracks SET status='done', file_path=?, error=NULL, downloaded_at=? WHERE id=?",
                     (filepath, datetime.now().isoformat(), row["id"]),
                 )
                 conn.commit()
-                console.print(f"  [green]✓[/green] {label}  [dim]{Path(filepath).name}[/dim]")
+                cover_tag = "  [dim cyan]🖼 cover[/dim cyan]" if cover_ok else "  [dim]no cover[/dim]"
+                console.print(f"  [green]✓[/green] {label}  [dim]{Path(filepath).name}[/dim]{cover_tag}")
                 done += 1
             except TooLongError as e:
                 error_msg = str(e)

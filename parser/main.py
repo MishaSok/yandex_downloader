@@ -180,8 +180,8 @@ COVER_SELECTORS = [
 
 def _normalize_cover_url(src: str) -> str:
     # URL вида: .../get-music-content/.../50x50  или  .../%%
-    src = re.sub(r"/\d+x\d+$", "/200x200", src)
-    src = re.sub(r"/%%$", "/200x200", src)
+    src = re.sub(r"/\d+x\d+$", "/1000x1000", src)
+    src = re.sub(r"/%%$", "/1000x1000", src)
     return src
 
 

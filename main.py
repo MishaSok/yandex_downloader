@@ -61,6 +61,7 @@ class Track:
     artist:       str
     duration:     str
     duration_sec: int
+    cover_url:    str = ""
 
 
 def duration_to_seconds(dur: str) -> int:
@@ -163,6 +164,61 @@ DURATION_SELECTORS = [
     "time",
 ]
 
+COVER_SELECTORS = [
+    "[class*='Album_cover'] img",
+    "[class*='album-art'] img",
+    "[class*='CoverImage'] img",
+    "[class*='cover'] img",
+    "[class*='Cover'] img",
+    "[class*='artwork'] img",
+    "img[src*='avatars.yandex.net']",
+    "img[src*='music-content']",
+]
+
+
+def _normalize_cover_url(src: str) -> str:
+    # URL вида: .../get-music-content/.../50x50  или  .../%%
+    src = re.sub(r"/\d+x\d+$", "/200x200", src)
+    src = re.sub(r"/%%$", "/200x200", src)
+    return src
+
+
+def find_cover_url(el) -> str:
+    for sel in COVER_SELECTORS:
+        try:
+            imgs = el.find_elements(By.CSS_SELECTOR, sel)
+            for img in imgs:
+                src = img.get_attribute("src") or img.get_attribute("data-src") or ""
+                if src and "avatars" in src:
+                    return _normalize_cover_url(src)
+        except Exception:
+            pass
+    return ""
+
+
+ALBUM_COVER_SELECTORS = [
+    "[class*='AlbumPage'] img[src*='avatars']",
+    "[class*='album-page'] img[src*='avatars']",
+    "[class*='AlbumHeader'] img[src*='avatars']",
+    "[class*='EntityHeader'] img[src*='avatars']",
+    "[class*='page-album'] img[src*='avatars']",
+    "[class*='Album_cover'] img[src*='avatars']",
+    "img[class*='CoverImage'][src*='avatars']",
+]
+
+
+def get_album_cover_url(driver: webdriver.Chrome) -> str:
+    for sel in ALBUM_COVER_SELECTORS:
+        try:
+            imgs = driver.find_elements(By.CSS_SELECTOR, sel)
+            for img in imgs:
+                src = img.get_attribute("src") or img.get_attribute("data-src") or ""
+                if src and "avatars" in src:
+                    return _normalize_cover_url(src)
+        except Exception:
+            pass
+    return ""
+
 
 def find_text(el, selectors: list) -> str:
     for sel in selectors:
@@ -221,6 +277,7 @@ def parse_track(el, index: int) -> Optional[Track]:
         artist=artist or "—",
         duration=dur or "—",
         duration_sec=duration_to_seconds(dur),
+        cover_url=find_cover_url(el),
     )
 
 
@@ -288,10 +345,10 @@ def scrape(url: str) -> list:
     print("   Яндекс Музыка — парсер 'Мне нравится'")
     print("=" * 62)
 
+    is_album = bool(re.search(r"music\.yandex\.[^/]+/album/\d+", url))
+
     driver = build_driver()
 
-    # Актуальный класс корневого элемента трека из диагностики
-    # (содержит 'CommonTrack_root')
     TRACK_SEL = "[class*='CommonTrack_root']"
 
     try:
@@ -340,10 +397,22 @@ def scrape(url: str) -> list:
                 print(e)
             return []
 
+        album_cover = ""
+        if is_album:
+            album_cover = get_album_cover_url(driver)
+            if album_cover:
+                print(f"  🖼  Обложка альбома: {album_cover}")
+            else:
+                print("  ⚠  Обложка альбома не найдена")
+
         time.sleep(1)
 
         print("[4/4] Скроллим и собираем треки...")
         tracks = scroll_virtual_list(driver, TRACK_SEL)
+
+        if is_album and album_cover:
+            for t in tracks:
+                t.cover_url = album_cover
 
         print(f"\n✅ Собрано уникальных треков: {len(tracks)}")
         return tracks
@@ -356,7 +425,7 @@ def scrape(url: str) -> list:
 
 def save_csv(tracks, path):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=["index","title","artist","duration","duration_sec"])
+        w = csv.DictWriter(f, fieldnames=["index","title","artist","duration","duration_sec","cover_url"])
         w.writeheader()
         w.writerows(asdict(t) for t in tracks)
     print(f"💾 CSV  → {path}")

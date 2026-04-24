@@ -19,10 +19,13 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 from mutagen import File as MutagenFile
+from mutagen.id3 import ID3, APIC, TIT2, TPE1
+from mutagen.mp3 import MP3
 
 from rich.console import Console
 from rich.table import Table
@@ -121,21 +124,45 @@ def fmt_duration(seconds: int) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def embed_metadata(filepath: Path, artist: str, title: str) -> None:
+def fetch_cover(url: str) -> tuple[bytes, str] | None:
+    if not url:
+        return None
     try:
-        audio = MutagenFile(str(filepath), easy=True)
-        if audio is None:
-            return
-        if audio.tags is None:
-            audio.add_tags()
-        audio["artist"] = [artist]
-        audio["title"] = [title]
-        audio.save()
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            mime = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            return resp.read(), mime
+    except Exception:
+        return None
+
+
+def embed_metadata(filepath: Path, artist: str, title: str, cover_url: str = "") -> None:
+    try:
+        if filepath.suffix.lower() == ".mp3":
+            audio = MP3(str(filepath), ID3=ID3)
+            if audio.tags is None:
+                audio.add_tags()
+            audio.tags.add(TIT2(encoding=3, text=[title]))
+            audio.tags.add(TPE1(encoding=3, text=[artist]))
+            if cover_url:
+                cover = fetch_cover(cover_url)
+                if cover:
+                    data, mime = cover
+                    audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=data))
+            audio.save(v2_version=3)
+        else:
+            audio = MutagenFile(str(filepath), easy=True)
+            if audio is None:
+                return
+            if audio.tags is None:
+                audio.add_tags()
+            audio["artist"] = [artist]
+            audio["title"] = [title]
+            audio.save()
     except Exception:
         pass
 
 
-def download_one(query: str, output_dir: Path, artist: str, title: str) -> str:
+def download_one(query: str, output_dir: Path, artist: str, title: str, cover_url: str = "") -> str:
     """Returns file path on success, raises RuntimeError or TooLongError."""
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_yt_dlp_cmd(query, output_dir)
@@ -166,7 +193,7 @@ def download_one(query: str, output_dir: Path, artist: str, title: str) -> str:
     target = downloaded.parent / target_name
     if downloaded != target:
         downloaded.rename(target)
-    embed_metadata(target, artist, title)
+    embed_metadata(target, artist, title, cover_url)
     return str(target)
 
 
@@ -276,7 +303,7 @@ def cmd_download(args: argparse.Namespace) -> None:
         console.print("[yellow]Warning:[/yellow] ffmpeg not found — saving as .webm instead of .mp3\n")
 
     conn = get_conn()
-    query = "SELECT id, artist, title FROM tracks WHERE status = 'pending' ORDER BY yandex_index, id"
+    query = "SELECT id, artist, title, cover_url FROM tracks WHERE status = 'pending' ORDER BY yandex_index, id"
     if args.limit:
         query += f" LIMIT {args.limit}"
     rows = conn.execute(query).fetchall()
@@ -310,7 +337,7 @@ def cmd_download(args: argparse.Namespace) -> None:
             progress.update(current, description=f"↓  {label}")
 
             try:
-                filepath = download_one(search_query, DOWNLOADS_DIR, artist, title)
+                filepath = download_one(search_query, DOWNLOADS_DIR, artist, title, row["cover_url"] or "")
                 conn.execute(
                     "UPDATE tracks SET status='done', file_path=?, error=NULL, downloaded_at=? WHERE id=?",
                     (filepath, datetime.now().isoformat(), row["id"]),

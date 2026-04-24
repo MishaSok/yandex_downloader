@@ -2,3 +2,7 @@
 __pycache__/
 .venv/
 *.pyc
+*.pyo
+tracks.db
+downloads/
+.env

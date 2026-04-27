@@ -42,6 +42,76 @@ sudo apt-get install -y ffmpeg
 
 ---
 
+## Запуск на Windows
+
+### 1. Установите Python
+
+Скачайте Python 3.10+ с [python.org](https://www.python.org/downloads/windows/).  
+При установке обязательно поставьте галочку **"Add Python to PATH"**.
+
+Проверьте установку в PowerShell или CMD:
+
+```cmd
+python --version
+```
+
+### 2. Установите Google Chrome
+
+Если Chrome ещё не установлен — скачайте с [google.com/chrome](https://www.google.com/chrome/).  
+ChromeDriver скачается автоматически через `webdriver-manager`.
+
+### 3. Установите зависимости
+
+```cmd
+pip install -r parser/requirements.txt
+pip install yt-dlp rich mutagen
+```
+
+> На Windows `--break-system-packages` указывать не нужно.
+
+### 4. Установите ffmpeg
+
+**Способ 1 — через winget (Windows 10/11):**
+
+```cmd
+winget install --id Gyan.FFmpeg -e
+```
+
+После установки перезапустите терминал.
+
+**Способ 2 — вручную:**
+
+1. Скачайте архив с [ffmpeg.org/download.html](https://ffmpeg.org/download.html) → Windows builds
+2. Распакуйте, например, в `C:\ffmpeg`
+3. Добавьте `C:\ffmpeg\bin` в переменную среды `PATH`:  
+   *Пуск → «Переменные среды» → Path → Изменить → Создать*
+
+Проверка:
+
+```cmd
+ffmpeg -version
+```
+
+### 5. Запустите скрипт
+
+На Windows используйте `python` вместо `python3`:
+
+```cmd
+python run.py "https://music.yandex.ru/users/login/playlists/3"
+```
+
+```cmd
+python run.py --no-parse
+```
+
+```cmd
+python script/download_track.py download --limit 20
+```
+
+> Если появится окно UAC или предупреждение антивируса — разрешите выполнение. Chrome откроется автоматически для авторизации.
+
+---
+
 ## Быстрый старт
 
 Полный цикл одной командой:
